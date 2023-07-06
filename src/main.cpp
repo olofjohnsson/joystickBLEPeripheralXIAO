@@ -1,222 +1,217 @@
 /*
-  Read analog value and send over BLE on standard battery monitor characteristic
+  This example scans for Bluetooth® Low Energy peripherals until one with the advertised service
+  "76ad7aaa-3782-11ed-a261-0242ac120002" UUID is found. Once discovered and connected it will listen to updates in the 
+  x_reading characteristic 76ad7aa1-3782-11ed-a261-0242ac120002 and y_reading characteristic 76ad7aa2-3782-11ed-a261-0242ac120002
 */
 
+#define PRO_BOAT_CONTROL
+// #define PRO_SERVO_CONTROL
 #include <Arduino.h>
 #include <ArduinoBLE.h>
-#define UPDATE_THRESH 0
-#define UPDATE_INTERVAL 10
+#include "mbed.h"
+union ArrayToInteger 
+{
+  byte array[4];
+  uint32_t integer;
+};
 
-#define UUID_Service 76ad7aaa-3782-11ed-a261-0242ac120002
-#define UUID_Char_1 76ad7aa1-3782-11ed-a261-0242ac120002
-#define UUID_Char_2 76ad7aa2-3782-11ed-a261-0242ac120002
+#define SERVICE_UUID "76ad7aaa-3782-11ed-a261-0242ac120002"
+#define PWM_FREQUENCY         10000
 
-#define BUTTON_1_PIN 2
+int mainMotorPWM_PIN = 10;
+int mainMotorPWM_LED_PIN = 13;
+int turnCW_PIN = 9;
+int turnCCW_PIN = 8;
+int runFwd_PIN = 6;
+int runBwd_PIN = 7;
+int led_PIN = 3;
+int pot_pin = 0;
+#ifdef PRO_SERVO_CONTROL
+int servo_PIN = 9;
+int servo_x_val = 90;
+#endif
 
-#define X_VALUE_PIN A0
-#define Y_VALUE_PIN A1
+int previousValue = 0;
 
-bool stateChanged = false;
-
-bool button_1_State = false;  
-bool turningDirection = 0; //Default direction is left
-bool runningDirection = 0;//Default is forward
-
-int x_readingRaw = 0;
-int y_readingRaw = 0;
-int x_reading = 0;
-int y_reading = 0;
-
- // Bluetooth® Low Energy Battery Service
-BLEService batteryService("180F");
-BLEService joystickService("76ad7aaa-3782-11ed-a261-0242ac120002");
-
-// Bluetooth® Low Energy Battery Level Characteristic
-BLEUnsignedCharCharacteristic batteryLevelChar("2A19",  // standard 16-bit characteristic UUID
-    BLERead | BLENotify); // remote clients will be able to get notifications if this characteristic changes
-
-BLEUnsignedIntCharacteristic x_readingChar("76ad7aa1-3782-11ed-a261-0242ac120002", BLERead | BLENotify);
-BLEUnsignedIntCharacteristic y_readingChar("76ad7aa2-3782-11ed-a261-0242ac120002", BLERead | BLENotify);
-BLEUnsignedIntCharacteristic x_rawReadingChar("76ad7ab1-3782-11ed-a261-0242ac120002", BLERead | BLENotify);
-BLEUnsignedIntCharacteristic y_rawReadingChar("76ad7ab2-3782-11ed-a261-0242ac120002", BLERead | BLENotify);
-BLEBooleanCharacteristic button1Char("76ad7aa3-3782-11ed-a261-0242ac120002", BLERead | BLENotify);
-BLEUnsignedIntCharacteristic turningDirectionChar("76ad7aa6-3782-11ed-a261-0242ac120002", BLERead | BLENotify);
-BLEUnsignedIntCharacteristic runningDirectionChar("76ad7aa7-3782-11ed-a261-0242ac120002", BLERead | BLENotify);
-
-int x_prevReading = 0;  // last battery level reading from analog input
-int y_prevReading = 0;  // last battery level reading from analog input
-long previousMillis = 0;  // last time the analog reading, in ms
-
-void setButton_1_State();
-void printButtonState();
-void printDirectionState();
-void updateAnalogReading();
+mbed::PwmOut pwmPin(digitalPinToPinName(mainMotorPWM_PIN));
+void read_x_y_values(BLEDevice peripheral);
+int byteArrayToInt(const byte data[], int length);
+void setDutyCycle(int duty);
 
 void setup() {
   BLE.setConnectionInterval(0x0006, 0x0006);
-  Serial.begin(9600);    // initialize serial communication
+  Serial.begin(9600);
   //while (!Serial);
+  pinMode(runFwd_PIN, OUTPUT);
+  pinMode(runBwd_PIN, OUTPUT);
+  pinMode(turnCW_PIN, OUTPUT);
+  pinMode(turnCCW_PIN, OUTPUT);
+  pinMode(led_PIN, OUTPUT);
+  pinMode(pot_pin, INPUT_PULLDOWN);
+  digitalWrite(led_PIN, LOW);
+  digitalWrite(runFwd_PIN, LOW);
+  digitalWrite(runBwd_PIN, LOW);
+  digitalWrite(turnCW_PIN, LOW);
+  digitalWrite(turnCCW_PIN, LOW);
+  pwmPin.write(0);
+  #ifdef PRO_SERVO_CONTROL
+  myServo.attach(servo_PIN);
+  #endif
+  pwmPin.period( 1.0 / PWM_FREQUENCY );
+  // initialize the Bluetooth® Low Energy hardware
+  BLE.begin();
 
-  pinMode(LED_BUILTIN, OUTPUT); // initialize the built-in LED pin to indicate when a central is connected
-  
-  pinMode(BUTTON_1_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(BUTTON_1_PIN), setButton_1_State, CHANGE);
+  Serial.println("Bluetooth® Low Energy Central. Joystick central with motor electronics");
+  Serial.print("Scanning for ");
+  Serial.print(SERVICE_UUID);
 
-  // begin initialization
-  if (!BLE.begin()) {
-    Serial.println("starting BLE failed!");
-
-    while (1);
-  }
-
-  /* Set a local name for the Bluetooth® Low Energy device
-     This name will appear in advertising packets
-     and can be used by remote devices to identify this Bluetooth® Low Energy device
-     The name can be changed but maybe be truncated based on space left in advertisement packet
-  */
-  BLE.setLocalName("JoyStickReading");
-  BLE.setAdvertisedService(batteryService); // add the service UUID
-  batteryService.addCharacteristic(batteryLevelChar); // add the battery level characteristic
-  BLE.addService(batteryService); // Add the battery service
-
-  BLE.setAdvertisedService(joystickService); // add the service UUID
-  joystickService.addCharacteristic(x_readingChar); // add the x reading characteristic
-  joystickService.addCharacteristic(y_readingChar); // add the y reading characteristic
-  joystickService.addCharacteristic(x_rawReadingChar); // add the x reading characteristic
-  joystickService.addCharacteristic(y_rawReadingChar); // add the y reading characteristic
-  joystickService.addCharacteristic(button1Char);
-  joystickService.addCharacteristic(turningDirectionChar);
-  joystickService.addCharacteristic(runningDirectionChar);
-  BLE.addService(joystickService); // Add the joystick service
-  
-  batteryLevelChar.writeValue(x_prevReading); // set initial value for this characteristic
-  batteryLevelChar.writeValue(y_prevReading); // set initial value for this characteristic
-  batteryLevelChar.writeValue(button_1_State);
-
-  /* Start advertising Bluetooth® Low Energy.  It will start continuously transmitting Bluetooth® Low Energy
-     advertising packets and will be visible to remote Bluetooth® Low Energy central devices
-     until it receives a new connection */
-
-  // start advertising
-  BLE.advertise();
-
-  Serial.println("Bluetooth® device active, waiting for connections...");
+  // start scanning for peripherals
+  BLE.scanForUuid(SERVICE_UUID);
 }
 
-void setButton_1_State()
+void setDutyCycle(int duty)
 {
-  stateChanged = true;
-  button_1_State = !button_1_State;
-}
-
-void printButtonState()
-{
-  Serial.print("Button1: ");
-  Serial.println(button_1_State);
-  button1Char.writeValue(button_1_State);
-  
-  Serial.print("\n");
-  stateChanged = false;
-}
-
-void printDirectionState()
-{
-  Serial.print("runningDirection: ");
-  Serial.println(runningDirection);
-  runningDirectionChar.writeValue(runningDirection);
-
-  Serial.print("turningDirection: ");
-  Serial.println(turningDirection);
-  turningDirectionChar.writeValue(turningDirection);
-}
-
-void updateAnalogReading() 
-{
-  
-  /* Read the current voltage level on the A0, A1 analog input pins.
-     This is used here to read Joystick pot values
-  */
-  x_readingRaw = analogRead(X_VALUE_PIN);
-  y_readingRaw = analogRead(Y_VALUE_PIN);
-  if (x_readingRaw < 511)
-  {
-    x_reading = map(x_readingRaw, 0, 511, 100, 0);
-    if (x_reading > 15)
-    {  
-      turningDirection = 0;
-    }
-  }
-  if (x_readingRaw > 511)
-  {
-    x_reading = map(x_readingRaw, 512, 1024, 0, 100);
-    if (x_reading > 15)
-    {  
-      turningDirection = 1;
-    }
-  }
-
-  if (y_readingRaw < 511)
-  {
-    y_reading = map(y_readingRaw, 0, 511, 100, 0);
-    if (y_reading > 15)
-    {  
-      runningDirection = 0;
-    }
-  }
-  if (y_readingRaw > 511)
-  {
-    y_reading = map(y_readingRaw, 512, 1024, 0, 100);
-    if (y_reading > 15)
-    {  
-      runningDirection = 1;
-    }
-  }
-  if (x_reading > 90)
-  {
-    x_reading = 100;
-  }
-  if (y_reading > 90)
-  {
-    y_reading = 100;
-  }
-  if (abs(x_reading-x_prevReading)>UPDATE_THRESH) // if the analog reading level has changed beyond preset threshold
-    {      
-      x_readingChar.writeValue((byte)x_reading);  // and update the characteristic
-      turningDirectionChar.writeValue((byte)turningDirection);
-      x_prevReading = x_reading;           // save the level for next comparison
-    }
-  
-  if (abs(y_reading-y_prevReading)>UPDATE_THRESH)
-  {      
-    y_readingChar.writeValue((byte)y_reading); // Update characteristic
-    runningDirectionChar.writeValue((byte)runningDirection);
-    /* save the level for next comparison */
-    y_prevReading = y_reading;
-  }
-  x_reading = 0;
-  y_reading = 0;
+  pwmPin.write( duty / 100.0 );
+  //Serial.print("dutyCycle is: ");
+  //Serial.println(duty);
 }
 
 void loop() {
-  // wait for a Bluetooth® Low Energy central
-  BLEDevice central = BLE.central();
-  
-  /* if a central is connected to the peripheral: */
-  if (central) {
-    Serial.print("Connected to central: ");
-    /* print the central's BT address: */
-    Serial.println(central.address());
+  // check if a peripheral has been discovered
+  BLEDevice peripheral = BLE.available();
 
-    /* update analog readings while the central is connected: */
-    while (central.connected()) {
-      updateAnalogReading();
-      if (stateChanged == true)
-      {
-        printButtonState();
-        stateChanged = false;
-      }
+  if (peripheral) {
+    digitalWrite(led_PIN, HIGH);
+    // discovered a peripheral, print out address, local name, and advertised service
+    Serial.print("Found ");
+    Serial.print(peripheral.address());
+    Serial.print(" '");
+    Serial.print(peripheral.localName());
+    Serial.print("' ");
+    Serial.print(peripheral.advertisedServiceUuid());
+    Serial.println();
+
+    if (peripheral.localName() != "JoyStickReading") {
+      return;
     }
-    Serial.print("Disconnected from central: ");
-    Serial.println(central.address());
+
+    // stop scanning
+    BLE.stopScan();
+
+    read_x_y_values(peripheral);
+
+    // peripheral disconnected, start scanning again
+    BLE.scanForUuid("76ad7aaa-3782-11ed-a261-0242ac120002");
   }
+  else
+  {
+    digitalWrite(led_PIN, LOW);
+  }
+}
+
+void read_x_y_values(BLEDevice peripheral)
+{
+  // connect to the peripheral
+  Serial.println("Connecting ...");
+
+  if (peripheral.connect()) {
+    Serial.println("Connected");
+  } else {
+    Serial.println("Failed to connect!");
+    return;
+  }
+
+  // discover peripheral attributes
+  Serial.println("Discovering attributes ...");
+  if (peripheral.discoverAttributes()) {
+    Serial.println("Attributes discovered");
+  } else {
+    Serial.println("Attribute discovery failed!");
+    peripheral.disconnect();
+    return;
+  }
+
+  // retrieve characteristic
+  BLECharacteristic x_readingChar = peripheral.characteristic("76ad7aa1-3782-11ed-a261-0242ac120002");
+  BLECharacteristic y_readingChar = peripheral.characteristic("76ad7aa2-3782-11ed-a261-0242ac120002");
+  BLECharacteristic x_rawReadingChar = peripheral.characteristic("76ad7ab1-3782-11ed-a261-0242ac120002");
+  BLECharacteristic y_rawReadingChar = peripheral.characteristic("76ad7ab2-3782-11ed-a261-0242ac120002");
+  BLECharacteristic turningDirectionChar = peripheral.characteristic("76ad7aa6-3782-11ed-a261-0242ac120002");
+  BLECharacteristic runningDirectionChar = peripheral.characteristic("76ad7aa7-3782-11ed-a261-0242ac120002");
+
+  BLECharacteristic button1Char = peripheral.characteristic("76ad7aa3-3782-11ed-a261-0242ac120002");
+
+  if (!x_readingChar) {
+    Serial.println("Peripheral does not have x_readingChar!");
+    peripheral.disconnect();
+    return;
+  }
+  if (!y_readingChar) {
+    Serial.println("Peripheral does not have y_readingChar!");
+    peripheral.disconnect();
+    return;
+  }
+
+  while (peripheral.connected()) 
+  {
+    turningDirectionChar.read();
+    if(byteArrayToInt(turningDirectionChar.value(), turningDirectionChar.valueLength()) == 1)
+    {
+      digitalWrite(turnCW_PIN, HIGH);
+      digitalWrite(turnCCW_PIN, LOW);
+    }
+    else
+    {
+      digitalWrite(turnCW_PIN, LOW);
+      digitalWrite(turnCCW_PIN, HIGH);
+    }
+    runningDirectionChar.read();
+    if(byteArrayToInt(runningDirectionChar.value(), runningDirectionChar.valueLength()) == 1)
+    {
+      digitalWrite(runFwd_PIN, HIGH);
+      digitalWrite(runBwd_PIN, LOW);
+    }
+    else
+    {
+      digitalWrite(runFwd_PIN, LOW);
+      digitalWrite(runBwd_PIN, HIGH);
+    }
+    
+    x_readingChar.read();
+    y_readingChar.read();
+    button1Char.read();
+    //Serial.println(button1Char.value().toString());
+    turningDirectionChar.read();
+    runningDirectionChar.read();
+
+    setDutyCycle(byteArrayToInt(x_readingChar.value(), x_readingChar.valueLength()));
+    #ifdef PRO_SERVO_CONTROL
+    myServo.write(map(byteArrayToInt(x_readingChar.value(), x_readingChar.valueLength()), 0, 100, 0, 180));
+    #endif
+
+    int value = analogRead(pot_pin); 
+    if (value != previousValue) {  // If the value has changed
+    Serial.println(value);  // Print the analog value
+    previousValue = value;  // Update the previous value
+    }
+  }
+  Serial.println("Peripheral disconnected");
+  digitalWrite(led_PIN, LOW);
+  setDutyCycle(0);
+}
+
+int byteArrayToInt(const byte data[], int length)
+{
+  byte dataW[length];
+  for (int i = 0;i < length; i++)
+  {
+    byte b = data[i];
+    dataW[i] = data[i];
+  }
+  ArrayToInteger converter;
+  converter.array[0] = dataW[0];
+  converter.array[1] = dataW[1];
+  converter.array[2] = dataW[2];
+  converter.array[3] = dataW[3];
+  return converter.integer;
 }
