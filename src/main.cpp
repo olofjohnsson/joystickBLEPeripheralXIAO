@@ -1,217 +1,249 @@
-/*
-  This example scans for Bluetooth® Low Energy peripherals until one with the advertised service
-  "76ad7aaa-3782-11ed-a261-0242ac120002" UUID is found. Once discovered and connected it will listen to updates in the 
-  x_reading characteristic 76ad7aa1-3782-11ed-a261-0242ac120002 and y_reading characteristic 76ad7aa2-3782-11ed-a261-0242ac120002
-*/
-
-#define PRO_BOAT_CONTROL
-// #define PRO_SERVO_CONTROL
 #include <Arduino.h>
 #include <ArduinoBLE.h>
-#include "mbed.h"
-union ArrayToInteger 
-{
-  byte array[4];
-  uint32_t integer;
-};
 
-#define SERVICE_UUID "76ad7aaa-3782-11ed-a261-0242ac120002"
-#define PWM_FREQUENCY         10000
-
-int mainMotorPWM_PIN = 10;
-int mainMotorPWM_LED_PIN = 13;
-int turnCW_PIN = 9;
-int turnCCW_PIN = 8;
-int runFwd_PIN = 6;
-int runBwd_PIN = 7;
+// Pin definitions
+const int mainMotorPWM_PIN = 10;
+const int turnCW_PIN = 9;
+const int turnCCW_PIN = 8;
+const int pot_pin = 0;
 int led_PIN = 3;
-int pot_pin = 0;
-#ifdef PRO_SERVO_CONTROL
-int servo_PIN = 9;
-int servo_x_val = 90;
-#endif
 
-int previousValue = 0;
+// BLE UUIDs
+const char* serviceUUID = "76ad7aaa-3782-11ed-a261-0242ac120002";
+const char* setpointCharUUID = "76ad7aa4-3782-11ed-a261-0242ac120002";
+const char* potValueCharUUID = "76ad7aa5-3782-11ed-a261-0242ac120002";
 
-mbed::PwmOut pwmPin(digitalPinToPinName(mainMotorPWM_PIN));
-void read_x_y_values(BLEDevice peripheral);
-int byteArrayToInt(const byte data[], int length);
-void setDutyCycle(int duty);
+BLEService service(serviceUUID);
+BLEUnsignedIntCharacteristic setpointChar(setpointCharUUID, BLERead | BLEWrite);
+BLEUnsignedIntCharacteristic potValueChar(potValueCharUUID, BLERead | BLENotify);
+
+// PID variables
+double setpoint = 127;
+double input = 0;
+double pot_value = 0;
+double pot_value_raw = 0;
+double output = 0;
+double Kp = 13;  // Proportional constant
+double Ki = 0.5;  // Integral constant
+double Kd = 0;  // Derivative constant
+double integralTerm = 0;
+double previousInput = 0;
+double previousOutput = 0;
+int pwm = 255;
+
+// Moving average filter
+const int numReadings = 50; // Number of readings to average
+int readings[numReadings];  // Array to store readings
+int readIndex = 0;          // Index for the next reading to be stored
+int total = 0;              // Running total of readings
+
+
+// Function prototypes
+void setupBLE();
+void handleCentralCommands();
+void runMotor();
+void runMotorMaxPWM(int direction);
+void updateMotorSpeed();
+void updatePotValueCharacteristic();
+int getSmoothedValue();
 
 void setup() {
-  BLE.setConnectionInterval(0x0006, 0x0006);
+  // Initialize serial communication
   Serial.begin(9600);
-  //while (!Serial);
-  pinMode(runFwd_PIN, OUTPUT);
-  pinMode(runBwd_PIN, OUTPUT);
+
+  // Initialize BLE
+  setupBLE();
+
+  // Set pin modes
+  pinMode(mainMotorPWM_PIN, OUTPUT);
   pinMode(turnCW_PIN, OUTPUT);
   pinMode(turnCCW_PIN, OUTPUT);
-  pinMode(led_PIN, OUTPUT);
   pinMode(pot_pin, INPUT_PULLDOWN);
-  digitalWrite(led_PIN, LOW);
-  digitalWrite(runFwd_PIN, LOW);
-  digitalWrite(runBwd_PIN, LOW);
+  pinMode(led_PIN, OUTPUT);
+
+  // Initialize motor control pins
   digitalWrite(turnCW_PIN, LOW);
   digitalWrite(turnCCW_PIN, LOW);
-  pwmPin.write(0);
-  #ifdef PRO_SERVO_CONTROL
-  myServo.attach(servo_PIN);
-  #endif
-  pwmPin.period( 1.0 / PWM_FREQUENCY );
-  // initialize the Bluetooth® Low Energy hardware
-  BLE.begin();
 
-  Serial.println("Bluetooth® Low Energy Central. Joystick central with motor electronics");
-  Serial.print("Scanning for ");
-  Serial.print(SERVICE_UUID);
-
-  // start scanning for peripherals
-  BLE.scanForUuid(SERVICE_UUID);
-}
-
-void setDutyCycle(int duty)
-{
-  pwmPin.write( duty / 100.0 );
-  //Serial.print("dutyCycle is: ");
-  //Serial.println(duty);
+  // Initialize the readings array to 0
+  for (int i = 0; i < numReadings; i++) {
+    readings[i] = 0;
+  }
 }
 
 void loop() {
-  // check if a peripheral has been discovered
-  BLEDevice peripheral = BLE.available();
+  handleCentralCommands();
+  runMotor();
+}
 
-  if (peripheral) {
-    digitalWrite(led_PIN, HIGH);
-    // discovered a peripheral, print out address, local name, and advertised service
-    Serial.print("Found ");
-    Serial.print(peripheral.address());
-    Serial.print(" '");
-    Serial.print(peripheral.localName());
-    Serial.print("' ");
-    Serial.print(peripheral.advertisedServiceUuid());
-    Serial.println();
-
-    if (peripheral.localName() != "JoyStickReading") {
-      return;
-    }
-
-    // stop scanning
-    BLE.stopScan();
-
-    read_x_y_values(peripheral);
-
-    // peripheral disconnected, start scanning again
-    BLE.scanForUuid("76ad7aaa-3782-11ed-a261-0242ac120002");
+void setupBLE() {
+  if (!BLE.begin()) {
+    Serial.println("Failed to initialize BLE!");
+    while (1);
   }
-  else
-  {
+
+  BLE.setLocalName("BoatMotorControl");
+  BLE.setAdvertisedService(service);
+  service.addCharacteristic(setpointChar);
+  service.addCharacteristic(potValueChar);
+  BLE.addService(service);
+  BLE.advertise();
+}
+
+void handleCentralCommands() {
+  BLEDevice central = BLE.central();
+  if (central) {
+    Serial.print("Connected to central: ");
+    Serial.println(central.address());
+    digitalWrite(led_PIN, HIGH);
+
+    while (central.connected()) {
+      if (setpointChar.written()) {
+        setpoint = setpointChar.value();
+        Serial.print("Setpoint, input: ");
+        Serial.print(setpoint);
+        Serial.print(" , ");
+        Serial.println(analogRead(pot_pin));
+        Serial.print("output: ");
+        Serial.println(output);
+        Serial.print("PWM: ");
+        Serial.println(pwm);
+      }
+      runMotor();
+    }
+  } else {
     digitalWrite(led_PIN, LOW);
   }
 }
 
-void read_x_y_values(BLEDevice peripheral)
-{
-  // connect to the peripheral
-  Serial.println("Connecting ...");
+void runMotor() {
+  // Define the hysteresis value (adjust this based on your requirements)
+  const int hysteresis = 5;
+  // Read input from potentiometer
+  //pot_value = analogRead(pot_pin);
+  // Smooth out the raw value using the moving average filter
+  pot_value = getSmoothedValue();
 
-  if (peripheral.connect()) {
-    Serial.println("Connected");
+  // Adjust motor direction based on output value with hysteresis
+  if (pot_value < setpoint - hysteresis) {
+    digitalWrite(turnCW_PIN, HIGH);
+    digitalWrite(turnCCW_PIN, LOW);
+  } else if (pot_value > setpoint + hysteresis) {
+    digitalWrite(turnCW_PIN, LOW);
+    digitalWrite(turnCCW_PIN, HIGH);
+  }
+
+  // Set PWM value based on pot value in relation to pot center
+  if (abs(pot_value - setpoint) > 15) {
+    pwm = 255;
+  } else if (abs(pot_value - setpoint) > 5) {
+    pwm = 150;
   } else {
-    Serial.println("Failed to connect!");
-    return;
+    pwm = 0;
   }
 
-  // discover peripheral attributes
-  Serial.println("Discovering attributes ...");
-  if (peripheral.discoverAttributes()) {
-    Serial.println("Attributes discovered");
-  } else {
-    Serial.println("Attribute discovery failed!");
-    peripheral.disconnect();
-    return;
-  }
-
-  // retrieve characteristic
-  BLECharacteristic x_readingChar = peripheral.characteristic("76ad7aa1-3782-11ed-a261-0242ac120002");
-  BLECharacteristic y_readingChar = peripheral.characteristic("76ad7aa2-3782-11ed-a261-0242ac120002");
-  BLECharacteristic x_rawReadingChar = peripheral.characteristic("76ad7ab1-3782-11ed-a261-0242ac120002");
-  BLECharacteristic y_rawReadingChar = peripheral.characteristic("76ad7ab2-3782-11ed-a261-0242ac120002");
-  BLECharacteristic turningDirectionChar = peripheral.characteristic("76ad7aa6-3782-11ed-a261-0242ac120002");
-  BLECharacteristic runningDirectionChar = peripheral.characteristic("76ad7aa7-3782-11ed-a261-0242ac120002");
-
-  BLECharacteristic button1Char = peripheral.characteristic("76ad7aa3-3782-11ed-a261-0242ac120002");
-
-  if (!x_readingChar) {
-    Serial.println("Peripheral does not have x_readingChar!");
-    peripheral.disconnect();
-    return;
-  }
-  if (!y_readingChar) {
-    Serial.println("Peripheral does not have y_readingChar!");
-    peripheral.disconnect();
-    return;
-  }
-
-  while (peripheral.connected()) 
-  {
-    turningDirectionChar.read();
-    if(byteArrayToInt(turningDirectionChar.value(), turningDirectionChar.valueLength()) == 1)
-    {
-      digitalWrite(turnCW_PIN, HIGH);
-      digitalWrite(turnCCW_PIN, LOW);
-    }
-    else
-    {
-      digitalWrite(turnCW_PIN, LOW);
-      digitalWrite(turnCCW_PIN, HIGH);
-    }
-    runningDirectionChar.read();
-    if(byteArrayToInt(runningDirectionChar.value(), runningDirectionChar.valueLength()) == 1)
-    {
-      digitalWrite(runFwd_PIN, HIGH);
-      digitalWrite(runBwd_PIN, LOW);
-    }
-    else
-    {
-      digitalWrite(runFwd_PIN, LOW);
-      digitalWrite(runBwd_PIN, HIGH);
-    }
-    
-    x_readingChar.read();
-    y_readingChar.read();
-    button1Char.read();
-    //Serial.println(button1Char.value().toString());
-    turningDirectionChar.read();
-    runningDirectionChar.read();
-
-    setDutyCycle(byteArrayToInt(x_readingChar.value(), x_readingChar.valueLength()));
-    #ifdef PRO_SERVO_CONTROL
-    myServo.write(map(byteArrayToInt(x_readingChar.value(), x_readingChar.valueLength()), 0, 100, 0, 180));
-    #endif
-
-    int value = analogRead(pot_pin); 
-    if (value != previousValue) {  // If the value has changed
-    Serial.println(value);  // Print the analog value
-    previousValue = value;  // Update the previous value
-    }
-  }
-  Serial.println("Peripheral disconnected");
-  digitalWrite(led_PIN, LOW);
-  setDutyCycle(0);
+  analogWrite(mainMotorPWM_PIN, pwm);
+  updatePotValueCharacteristic();
 }
 
-int byteArrayToInt(const byte data[], int length)
-{
-  byte dataW[length];
-  for (int i = 0;i < length; i++)
-  {
-    byte b = data[i];
-    dataW[i] = data[i];
+void runMotorPID() {
+  // Read input from potentiometer
+  input = analogRead(pot_pin);
+
+  // Compute PID terms
+  double error = setpoint - input;
+  integralTerm += error;
+  double derivativeTerm = input - previousInput;
+
+  // Compute output using PID control equation
+  output = Kp * error + Ki * integralTerm + Kd * derivativeTerm;
+
+  // Adjust motor direction based on output value
+  if (output > 0) {
+    digitalWrite(turnCW_PIN, HIGH);
+    digitalWrite(turnCCW_PIN, LOW);
+  } else if (output < 0) {
+    digitalWrite(turnCW_PIN, LOW);
+    digitalWrite(turnCCW_PIN, HIGH);
+  } else {
+    // Stop the motor when output is zero
+    digitalWrite(turnCW_PIN, LOW);
+    digitalWrite(turnCCW_PIN, LOW);
   }
-  ArrayToInteger converter;
-  converter.array[0] = dataW[0];
-  converter.array[1] = dataW[1];
-  converter.array[2] = dataW[2];
-  converter.array[3] = dataW[3];
-  return converter.integer;
+
+  output = abs(output);
+  output = constrain(output, 0, 255); // Limit output to PWM range
+
+  // Set PWM value based on output
+  analogWrite(mainMotorPWM_PIN, static_cast<int>(output));
+
+  // Update previous input and output
+  previousInput = input;
+  previousOutput = output;
+}
+
+void runMotorMaxPWM(int direction) {
+  // Drive the motor with maximum PWM until pot value stops changing
+  double prevPotValue = 0;
+  while (true) {
+    input = analogRead(pot_pin);
+    if (input != prevPotValue) {
+      // Potentiometer value changed, keep driving at max PWM
+      if (direction > 0) {
+        digitalWrite(turnCW_PIN, HIGH);
+        digitalWrite(turnCCW_PIN, LOW);
+      } else if (direction < 0) {
+        digitalWrite(turnCW_PIN, LOW);
+        digitalWrite(turnCCW_PIN, HIGH);
+      }
+      analogWrite(mainMotorPWM_PIN, 255);
+      prevPotValue = input;
+    } else {
+      // Potentiometer value stopped changing, stop the motor and exit the loop
+      digitalWrite(turnCW_PIN, LOW);
+      digitalWrite(turnCCW_PIN, LOW);
+      analogWrite(mainMotorPWM_PIN, 0);
+      break;
+    }
+    delay(100);
+  }
+}
+
+void updateMotorSpeed() {
+  // Check the setpoint and run the motor accordingly
+  if (setpoint == 1) {
+    // Drive the motor with maximum PWM in the clockwise direction until pot value stops changing
+    runMotorMaxPWM(1);
+  } else if (setpoint == 2) {
+    // Drive the motor with maximum PWM in the counterclockwise direction until pot value stops changing
+    runMotorMaxPWM(-1);
+  } else {
+    // For all other setpoint values, call runMotor
+    runMotor();
+  }
+}
+
+void updatePotValueCharacteristic() {
+  // Update the potValueChar characteristic with the potentiometer value
+  potValueChar.writeValue(pot_value);
+}
+
+int getSmoothedValue() {
+  // Subtract the last reading from the total
+  total = total - readings[readIndex];
+
+  // Read from the potentiometer and add the new reading to the total
+  readings[readIndex] = analogRead(pot_pin);
+  total = total + readings[readIndex];
+
+  // Advance to the next position in the array
+  readIndex++;
+
+  // If we've reached the end of the array, wrap around to the beginning
+  if (readIndex >= numReadings) {
+    readIndex = 0;
+  }
+
+  // Calculate the average and return the smoothed value
+  return total / numReadings;
 }
