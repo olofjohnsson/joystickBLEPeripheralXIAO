@@ -16,6 +16,6 @@ void setup() {
 void loop() {
   // Handle BLE connection and commands
   handleCentralCommands();
-  // Run motor without BLE connection
+  // Run motor towards setpoint even without BLE connection
   runMotor();
 }
