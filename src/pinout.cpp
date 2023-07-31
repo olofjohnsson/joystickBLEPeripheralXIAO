@@ -1,5 +1,6 @@
 // pinout.cpp
 #include "pinout.h"
+#include "motor_handler.h"
 
 void setupPINs(){
     // Set pin modes
@@ -10,6 +11,5 @@ void setupPINs(){
     pinMode(ble_led_PIN, OUTPUT);
 
     // Initialize motor control pins
-    digitalWrite(turnCW_PIN, LOW);
-    digitalWrite(turnCCW_PIN, LOW);
+    setMotorDirection(NONE);
 }

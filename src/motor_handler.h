@@ -4,6 +4,13 @@
 
 #include <Arduino.h>
 
+enum MotorDirection
+{
+    NONE,
+    CW,
+    CCW
+};
+
 // Function declaration
 void runMotor();
 void runMotorMaxPWM(int direction);

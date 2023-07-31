@@ -25,12 +25,6 @@ int pwm = 255;
 const int numReadings = 10; // Number of readings to average
 int readings[numReadings];  // Array to store readings
 
-enum MotorDirection
-{
-    CW,
-    CCW
-};
-
 void runMotor() {
   static bool motor_is_active = false;
   // Define the hysteresis value (adjust this based on your requirements)
@@ -97,15 +91,12 @@ void runMotorPID() {
 
   // Adjust motor direction based on output value
   if (output > 0) {
-    digitalWrite(turnCW_PIN, HIGH);
-    digitalWrite(turnCCW_PIN, LOW);
+    setMotorDirection(CW);
   } else if (output < 0) {
-    digitalWrite(turnCW_PIN, LOW);
-    digitalWrite(turnCCW_PIN, HIGH);
+    setMotorDirection(CCW);
   } else {
     // Stop the motor when output is zero
-    digitalWrite(turnCW_PIN, LOW);
-    digitalWrite(turnCCW_PIN, LOW);
+    setMotorDirection(NONE);
   }
 
   output = abs(output);
@@ -127,18 +118,15 @@ void runMotorMaxPWM(int direction) {
     if (input != prevPotValue) {
       // Potentiometer value changed, keep driving at max PWM
       if (direction > 0) {
-        digitalWrite(turnCW_PIN, HIGH);
-        digitalWrite(turnCCW_PIN, LOW);
+        setMotorDirection(CW);
       } else if (direction < 0) {
-        digitalWrite(turnCW_PIN, LOW);
-        digitalWrite(turnCCW_PIN, HIGH);
+        setMotorDirection(CCW);
       }
       analogWrite(mainMotorPWM_PIN, 255);
       prevPotValue = input;
     } else {
       // Potentiometer value stopped changing, stop the motor and exit the loop
-      digitalWrite(turnCW_PIN, LOW);
-      digitalWrite(turnCCW_PIN, LOW);
+      setMotorDirection(NONE);
       analogWrite(mainMotorPWM_PIN, 0);
       break;
     }
@@ -202,6 +190,8 @@ void setMotorDirection(uint8_t dir)
             digitalWrite(turnCCW_PIN, HIGH);
             break;
         default:
+            digitalWrite(turnCW_PIN, LOW);
+            digitalWrite(turnCCW_PIN, LOW);
             break;
     }
 }
