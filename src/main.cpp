@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "ble_handler.h"
 #include "pinout.h"
+#include "motor_handler.h"
 
 void setup() {
   // Initialize serial communication
@@ -13,5 +14,8 @@ void setup() {
 }
 
 void loop() {
+  // Handle BLE connection and commands
   handleCentralCommands();
+  // Run motor without BLE connection
+  runMotor();
 }
