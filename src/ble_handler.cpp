@@ -47,7 +47,9 @@ void handleCentralCommands() {
       }
       if (contorlChar.written())
       {
-        control_output = contorlChar.value();
+        control_output = constrain(contorlChar.value(), -5, 5);
+        Serial.print("Control char written, value: ");
+        Serial.println(control_output);
       }
       runMotor();
     }

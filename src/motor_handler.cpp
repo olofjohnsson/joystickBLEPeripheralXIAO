@@ -15,7 +15,7 @@ double previousOutput = 0;
 
 // Potentiometer
 double pot_value = 0;
-double pot_center = 252;
+double pot_center = 227;
 
 // Motor PWM signal
 int pwm = 255;
